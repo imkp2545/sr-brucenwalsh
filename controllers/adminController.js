@@ -1,5 +1,4 @@
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const Admin = require('../models/adminModel');
 const User = require('../models/userModel');
 const Order = require('../models/orderModel');
@@ -15,6 +14,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const ApiResponse = require('../utils/apiResponse');
 const { generateAccessToken } = require('../utils/generateToken');
 const { generateOtp, hashToken } = require('../utils/cryptoUtils');
+const { getEmailTransport, getFromAddress, logSmtpError } = require('../utils/emailTransport');
 const {
   PASSWORD_RESET_OTP_MAX_ATTEMPTS,
   createPasswordResetOtp,
@@ -27,26 +27,6 @@ const PASSWORD_PATTERN = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,
 const ADMIN_VERIFICATION_OTP_TTL = 10 * 60 * 1000;
 const ADMIN_ROLES = ['superAdmin', 'admin', 'catalogManager', 'orderManager', 'supportManager', 'marketingManager'];
 
-let mailTransport;
-
-const getMailTransport = () => {
-  if (mailTransport) return mailTransport;
-  const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_FROM_EMAIL'];
-  const missing = required.filter((key) => !process.env[key]);
-  if (missing.length) throw new Error(`Missing SMTP configuration: ${missing.join(', ')}`);
-
-  mailTransport = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD },
-    pool: true,
-    maxConnections: 5,
-    maxMessages: 100,
-  });
-  return mailTransport;
-};
-
 const escapeHtml = (value) =>
   String(value).replace(/[&<>'"]/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
@@ -54,23 +34,17 @@ const escapeHtml = (value) =>
 
 const sendAdminEmail = async ({ to, subject, text, html }) => {
   try {
-    return await getMailTransport().sendMail({
-      from: `"${process.env.SMTP_FROM_NAME || 'Bruce & Walsh Luxury'}" <${process.env.SMTP_FROM_EMAIL}>`,
+    return await getEmailTransport().sendMail({
+      from: getFromAddress(),
       to,
       subject,
       text,
       html,
     });
   } catch (error) {
+    logSmtpError('Admin email delivery failed', error);
     if (process.env.NODE_ENV !== 'production') {
-      console.warn(
-        `\n============================================================\n` +
-        `⚠️  [DEV ADMIN EMAIL] SMTP send failed: ${error.message}\n` +
-        `📬 To: ${to}\n` +
-        `📝 Subject: ${subject}\n` +
-        `💬 Message:\n${text}\n` +
-        `============================================================\n`
-      );
+      console.warn('[DEV ADMIN EMAIL] SMTP delivery failed; development fallback retained.');
       return { messageId: 'dev-mock-admin-id', devFallback: true };
     }
     throw error;

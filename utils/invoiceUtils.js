@@ -1,11 +1,10 @@
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
-const nodemailer = require('nodemailer');
 const { invoiceProfile } = require('../config/invoiceConfig');
 const { uploadBuffer } = require('./cloudinaryUtils');
 const Payment = require('../models/paymentModel');
+const { getEmailTransport, getFromAddress, logSmtpError } = require('./emailTransport');
 
-let mailTransport;
 const INVOICE_TEMPLATE_VERSION = 'bw-tax-invoice-v4';
 
 const PAGE = {
@@ -92,22 +91,6 @@ const resolveInvoicePayment = async (order) => {
     .select('paymentReference gatewayOrderId transactionId bankReferenceNumber method status capturedAt')
     .sort({ capturedAt: -1, createdAt: -1 })
     .lean();
-};
-
-const getMailTransport = () => {
-  if (mailTransport) return mailTransport;
-  const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_FROM_EMAIL'];
-  const missing = required.filter((key) => !process.env[key]);
-  if (missing.length) throw new Error(`Missing SMTP configuration: ${missing.join(', ')}`);
-  mailTransport = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD },
-    pool: true,
-    maxConnections: 5,
-  });
-  return mailTransport;
 };
 
 const addressLines = (address = {}) => [
@@ -643,14 +626,19 @@ const createAndUploadInvoice = async (order) => {
 };
 
 const sendInvoiceEmail = async ({ user, order, invoice }) => {
-  await getMailTransport().sendMail({
-    from: `"${process.env.SMTP_FROM_NAME || 'Bruce & Walsh Luxury'}" <${process.env.SMTP_FROM_EMAIL}>`,
+  try {
+    await getEmailTransport().sendMail({
+    from: getFromAddress(),
     to: user.email,
     subject: `Your Bruce & Walsh Luxury order ${order.orderNumber}`,
     text: `Thank you for your order ${order.orderNumber}. Your invoice ${invoice.invoiceNumber} is attached and is also available at ${invoice.invoiceUrl}`,
     html: `<p>Hello ${String(user.firstName || 'Customer').replace(/[&<>'"]/g, '')},</p><p>Thank you for your order <strong>${order.orderNumber}</strong>.</p><p>Your tax invoice is attached.</p>`,
     attachments: [{ filename: `${invoice.invoiceNumber}.pdf`, content: invoice.pdfBuffer, contentType: 'application/pdf' }],
-  });
+    });
+  } catch (error) {
+    logSmtpError('Invoice email delivery failed', error);
+    throw error;
+  }
 };
 
 module.exports = {

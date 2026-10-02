@@ -1,6 +1,5 @@
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
 const User = require('../models/userModel');
 const CustomerAuthOtp = require('../models/customerAuthOtpModel');
 const AuditLog = require('../models/auditLogModel');
@@ -9,6 +8,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const ApiResponse = require('../utils/apiResponse');
 const { generateAccessToken, generateRefreshToken, verifyRefreshToken } = require('../utils/generateToken');
 const { generateOtp, hashToken, safeCompare } = require('../utils/cryptoUtils');
+const { getEmailTransport, getFromAddress, logSmtpError } = require('../utils/emailTransport');
 const {
   CUSTOMER_AUTH_OTP_TTL_MS,
   CUSTOMER_AUTH_OTP_RESEND_COOLDOWN_MS,
@@ -32,26 +32,6 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_PATTERN = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,128}$/;
 const VERIFICATION_OTP_TTL = 10 * 60 * 1000;
 
-let mailTransport;
-
-const getMailTransport = () => {
-  if (mailTransport) return mailTransport;
-  const required = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_FROM_EMAIL'];
-  const missing = required.filter((key) => !process.env[key]);
-  if (missing.length) throw new Error(`Missing SMTP configuration: ${missing.join(', ')}`);
-
-  mailTransport = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD },
-    pool: true,
-    maxConnections: 5,
-    maxMessages: 100,
-  });
-  return mailTransport;
-};
-
 const escapeHtml = (value) =>
   String(value).replace(/[&<>'"]/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
@@ -59,26 +39,22 @@ const escapeHtml = (value) =>
 
 const sendEmail = async ({ to, subject, text, html }) => {
   try {
-    return await getMailTransport().sendMail({
-      from: `"${process.env.SMTP_FROM_NAME || 'Bruce & Walsh Luxury'}" <${process.env.SMTP_FROM_EMAIL}>`,
+    return await getEmailTransport().sendMail({
+      from: getFromAddress(),
       to,
       subject,
       text,
       html,
     });
   } catch (error) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn(
-        `\n============================================================\n` +
-        `⚠️  [DEV EMAIL] SMTP send failed: ${error.message}\n` +
-        `📬 To: ${to}\n` +
-        `📝 Subject: ${subject}\n` +
-        `💬 Message:\n${text}\n` +
-        `============================================================\n`
-      );
-      return { messageId: 'dev-mock-id', devFallback: true };
-    }
-    throw error;
+    // Keep provider diagnostics useful without writing recipients, message bodies,
+    // OTPs, or credentials into logs. Never report a failed delivery as success.
+    logSmtpError('Authentication email delivery failed', error);
+    throw new AppError(
+      'Email delivery is temporarily unavailable. Please try again later.',
+      503,
+      'EMAIL_DELIVERY_FAILED',
+    );
   }
 };
 
@@ -290,7 +266,6 @@ const requestOtp = asyncHandler(async (req, res) => {
     data: {
       expiresInSeconds: Math.ceil(CUSTOMER_AUTH_OTP_TTL_MS / 1000),
       resendAfterSeconds: Math.ceil(CUSTOMER_AUTH_OTP_RESEND_COOLDOWN_MS / 1000),
-      ...(process.env.NODE_ENV !== 'production' ? { devOtp: otpChallenge.otp } : {}),
     },
   });
 });

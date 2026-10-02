@@ -12,6 +12,7 @@ const { applySecurityMiddleware } = require('./middleware/securityMiddleware');
 const notFoundMiddleware = require('./middleware/notFoundMiddleware');
 const errorMiddleware = require('./middleware/errorMiddleware');
 const ApiResponse = require('./utils/apiResponse');
+const { verifyEmailTransport, logSmtpError } = require('./utils/emailTransport');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const categoryRoutes = require('./routes/categoryRoutes');
@@ -161,6 +162,9 @@ const startServer = async () => {
     httpServer.listen(port);
   });
   console.info(`Bruce & Walsh Luxury API listening on port ${port} (${process.env.NODE_ENV || 'development'})`);
+  // SMTP must not prevent HTTP startup. Verification runs in the background and
+  // logs DNS/TCP versus TLS/SMTP/auth failures separately for Render diagnosis.
+  verifyEmailTransport().catch((error) => logSmtpError('Startup verification could not run', error));
 };
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
